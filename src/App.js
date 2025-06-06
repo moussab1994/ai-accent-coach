@@ -18,18 +18,87 @@ const App = () => {
     const [awaitingFeatureInput, setAwaitingFeatureInput] = useState(null);
     // Reference to the SpeechRecognition instance
     const recognitionRef = useRef(null);
-    // Reference to the SpeechSynthesisUtterance instance
-    const utteranceRef = useRef(null);
-    // Reference to the chat history container for auto-scrolling
-    const chatHistoryRef = useRef(null);
+    // Reference to the SpeechSynthesisUtterance instance (managed within speakMessage now)
+    const utteranceRef = useRef(null); // Keep for consistency, but largely unused directly
 
     // Gemini API configuration
-    // IMPORTANT: This is correctly set for local development with 'npm start' using process.env.
-    // DO NOT CHANGE this unless instructed to run directly in Canvas.
     const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
 
     // Prompt to establish the AI's persona as a British BBC accent teacher
     const initialPrompt = "You are an AI virtual teacher focused on helping users learn and practice a British BBC accent. Your responses should be clear, concise, and use formal British English vocabulary and phrasing. When appropriate, offer specific advice on pronunciation, intonation, or common British English nuances based on the user's input. Encourage polite, clear conversation. Start by introducing yourself and asking how you can assist the user in their journey to master the British accent.";
+
+    // Function to speak a given text message, now with chunking for long sentences
+    const speakMessage = (text) => {
+        const synth = window.speechSynthesis;
+        if (synth.speaking) {
+            synth.cancel(); // Stop current speech if any
+        }
+
+        const voices = synth.getVoices();
+        const britishVoice = voices.find(voice => voice.name.includes('Google UK English') || voice.lang === 'en-GB');
+        
+        // Chunking the text for longer sentences to prevent truncation issues
+        const maxUtteranceLength = 180; 
+        // Split by punctuation or by space if no punctuation, and filter out empty strings
+        const words = text.split(/\s+/); 
+        const chunks = [];
+        let currentChunk = '';
+
+        for (const word of words) {
+            if ((currentChunk + ' ' + word).trim().length <= maxUtteranceLength) {
+                currentChunk += ' ' + word;
+            } else {
+                if (currentChunk.trim()) {
+                    chunks.push(currentChunk.trim());
+                }
+                currentChunk = word;
+            }
+        }
+        if (currentChunk.trim()) {
+            chunks.push(currentChunk.trim());
+        }
+
+        let chunkIndex = 0;
+
+        const speakNextChunk = () => {
+            if (chunkIndex < chunks.length) {
+                const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex]);
+                if (britishVoice) {
+                    utterance.voice = britishVoice;
+                }
+                utterance.lang = 'en-GB';
+                utterance.rate = 1;
+                utterance.pitch = 1;
+
+                utterance.onstart = () => setIsSpeaking(true);
+                utterance.onend = () => {
+                    chunkIndex++;
+                    if (chunkIndex < chunks.length) {
+                        speakNextChunk(); // Speak the next chunk
+                    } else {
+                        setIsSpeaking(false); // All chunks spoken
+                    }
+                };
+                utterance.onerror = (event) => {
+                    console.error('Speech synthesis error on chunk:', event.error);
+                    setError(`Speech synthesis error: ${event.error}`);
+                    setIsSpeaking(false);
+                };
+                synth.speak(utterance);
+            }
+        };
+
+        speakNextChunk(); // Start speaking the first chunk
+    };
+
+    // Function to stop the AI's current speech
+    const stopSpeaking = () => {
+        const synth = window.speechSynthesis;
+        if (synth.speaking) {
+            synth.cancel();
+            setIsSpeaking(false);
+        }
+    };
 
     // Effect for initializing Speech Recognition and Speech Synthesis
     useEffect(() => {
@@ -43,14 +112,19 @@ const App = () => {
             // Event handler for when speech recognition results are available
             recognitionRef.current.onresult = (event) => {
                 const speechResult = event.results[0][0].transcript;
-                setMessage(speechResult); // Set the recognized speech as the current message
+                console.log("Speech recognized (onresult):", speechResult); // Log the recognized speech
+                setMessage(speechResult); // Update the input field with recognized text
+                // Directly send the recognized speech to the AI from here
+                // This ensures the current result is sent immediately
+                sendMessage(speechResult); 
                 stopListening(); // Stop listening after receiving a result
-                sendMessage(speechResult); // Send the recognized speech to the AI
             };
 
             // Event handler for when speech recognition ends
             recognitionRef.current.onend = () => {
                 setIsListening(false);
+                // Remove "Listening..." message if it's still there (e.g., if speech was too short or recognition failed to trigger onresult)
+                setConversation(prev => prev.filter(msg => msg.text !== 'Listening...'));
             };
 
             // Event handler for speech recognition errors
@@ -58,34 +132,11 @@ const App = () => {
                 console.error('Speech recognition error:', event.error);
                 setError(`Speech recognition error: ${event.error}. Please ensure microphone access is granted.`);
                 setIsListening(false);
+                setConversation(prev => prev.filter(msg => msg.text !== 'Listening...')); // Remove "Listening..." message on error
             };
         } else {
             setError("Web Speech API is not supported in this browser. Please use Chrome or Edge for voice input.");
         }
-
-        // Initialize SpeechSynthesis
-        const synth = window.speechSynthesis;
-        utteranceRef.current = new SpeechSynthesisUtterance();
-        utteranceRef.current.lang = 'en-GB'; // Set synthesis language to British English
-        utteranceRef.current.rate = 1; // Normal speed
-        utteranceRef.current.pitch = 1; // Normal pitch
-
-        // Event handler for when speech synthesis starts
-        utteranceRef.current.onstart = () => {
-            setIsSpeaking(true);
-        };
-
-        // Event handler for when speech synthesis ends
-        utteranceRef.current.onend = () => {
-            setIsSpeaking(false);
-        };
-
-        // Event handler for speech synthesis errors
-        utteranceRef.current.onerror = (event) => {
-            console.error('Speech synthesis error:', event.error);
-            setError(`Speech synthesis error: ${event.error}`);
-            setIsSpeaking(false);
-        };
 
         // Initial greeting from the AI teacher
         setConversation([{ role: 'model', text: 'Hello! I am your AI British accent teacher. How may I assist you today in mastering the nuances of British English?' }]);
@@ -112,26 +163,20 @@ const App = () => {
     const startListening = () => {
         if (recognitionRef.current && !isListening) {
             setError(''); // Clear previous errors
+            setMessage(''); // Clear input field to prepare for new speech input
+            // Add a temporary 'Listening...' message to the conversation
+            setConversation(prev => [...prev, { role: 'user', text: 'Listening...' }]); 
             try {
                 recognitionRef.current.start();
                 setIsListening(true);
-                // Add a temporary 'Listening...' message to the conversation
-                setConversation(prev => [...prev, { role: 'user', text: 'Listening...' }]);
             } catch (e) {
                 console.error("Error starting speech recognition:", e);
-                setError("Failed to start speech recognition. Please check microphone permissions.");
+                setError("Failed to start speech recognition. Please check microphone permissions and try again.");
                 setIsListening(false);
+                setConversation(prev => prev.filter(msg => msg.text !== 'Listening...')); // Remove listening indicator on immediate error
             }
         } else {
             setError("Speech recognition is not available or already active.");
-        }
-    };
-
-    // Function to stop speech recognition
-    const stopListening = () => {
-        if (recognitionRef.current && isListening) {
-            recognitionRef.current.stop();
-            setIsListening(false);
         }
     };
 
@@ -139,11 +184,17 @@ const App = () => {
     const sendPromptToGemini = async (promptContent) => {
         setIsLoading(true); // Set loading state
 
-        // Prepare chat history for Gemini API, including the initial prompt
-        // Filter out 'listening' messages and map roles for API
+        // Prepare chat history for Gemini API, filtering out temporary UI messages
+        const filteredConversation = conversation.filter(msg => 
+            msg.text !== 'Listening...' &&
+            !msg.text.startsWith('✨') && // Filters all feature initiation messages
+            msg.text !== 'Thank you. Please wait a moment while I compile some suggestions for you.' &&
+            msg.text !== 'Understood. Let me consider how to best rephrase that for a British context.'
+        );
+
         const chatHistory = [
             { role: "user", parts: [{ text: initialPrompt }] },
-            ...conversation.filter(msg => msg.text !== 'Listening...' && msg.text !== '✨ I\'d like some British vocabulary/idioms.' && msg.text !== '✨ I\'d like a sentence rephrased in British English.' && msg.text !== '✨ Requested pronunciation tips for:' && msg.text !== '✨ Starting a new role-play scenario...').map(msg => ({ // Filter out feature activation messages
+            ...filteredConversation.map(msg => ({ 
                 role: msg.role === 'user' ? 'user' : 'model',
                 parts: [{ text: msg.text }]
             })),
@@ -187,45 +238,50 @@ const App = () => {
 
     // Function to handle sending messages (either typed or spoken)
     const sendMessage = async (textToSend = message) => {
-        if (!textToSend.trim() || isLoading) {
+        // Remove any existing 'Listening...' indicator from conversation history
+        setConversation(prev => prev.filter(msg => msg.text !== 'Listening...'));
+
+        const userMessageContent = textToSend.trim(); // Ensure content is trimmed
+
+        if (!userMessageContent || isLoading) {
+            setError("Please enter or speak a message to send.");
             return; // Don't send empty messages or if loading
         }
 
         setError(''); // Clear previous errors
-        const userMessage = { role: 'user', text: textToSend };
+        
+        // Add the user's actual input to conversation history
+        setConversation(prev => [...prev, { role: 'user', text: userMessageContent }]);
+        setMessage(''); // Clear input field after adding to conversation
 
-        // Remove the "Listening..." message if it's the last one
-        setConversation(prev => {
-            const updated = prev.filter(msg => msg.text !== 'Listening...');
-            return [...updated, userMessage];
-        });
-        setMessage(''); // Clear input field
-
+        // Handle specific feature inputs if awaiting
         if (awaitingFeatureInput === 'vocab') {
-            const prompt = `The user is asking for British English vocabulary and idioms related to the topic: "${textToSend}". As a British BBC accent teacher, please provide a list of 5-7 relevant words or idioms with brief explanations/contexts.`;
+            const prompt = `The user is asking for British English vocabulary and idioms related to the topic: "${userMessageContent}". As a British BBC accent teacher, please provide a list of 5-7 relevant words or idioms with brief explanations/contexts.`;
             setAwaitingFeatureInput(null); // Reset the feature input flag
-            // Add a placeholder message while AI is thinking
             setConversation(prev => [...prev, { role: 'model', text: 'Thank you. Please wait a moment while I compile some suggestions for you.' }]);
             await sendPromptToGemini(prompt);
         } else if (awaitingFeatureInput === 'rephrase') {
-            const prompt = `The user wants to rephrase the sentence: "${textToSend}". As a British BBC accent teacher, please rephrase this sentence to sound more natural and idiomatic in British English. Offer one or two alternative phrasings.`;
+            const prompt = `The user wants to rephrase the sentence: "${userMessageContent}". As a British BBC accent teacher, please rephrase this sentence to sound more natural and idiomatic in British English. Offer one or two alternative phrasings.`;
             setAwaitingFeatureInput(null); // Reset the feature input flag
-            // Add a placeholder message while AI is thinking
             setConversation(prev => [...prev, { role: 'model', text: 'Understood. Let me consider how to best rephrase that for a British context.' }]);
             await sendPromptToGemini(prompt);
         } else {
-            // Normal chat flow
-            await sendPromptToGemini(userMessage.text);
+            // Normal chat flow: send user message to AI
+            await sendPromptToGemini(userMessageContent);
         }
     };
 
     // Function to get pronunciation tips using Gemini API
     const getPronunciationTips = async () => {
-        // Find the last actual user message (not 'Listening...')
+        setError('');
+        if (isLoading || isListening || isSpeaking || awaitingFeatureInput) return; // Prevent multiple clicks
+
+        // Find the last actual user message (not temporary or feature initiation messages)
         const lastUserMessage = conversation
-            .slice() // Create a shallow copy to avoid mutating state directly
-            .reverse() // Reverse to find the last message quickly
-            .find(msg => msg.role === 'user' && msg.text !== 'Listening...');
+            .slice()
+            .reverse()
+            .find(msg => msg.role === 'user' && msg.text !== 'Listening...' &&
+                          !msg.text.startsWith('✨')); // Filter out all feature initiation messages
 
         if (!lastUserMessage) {
             setError("Please speak or type a message first to get pronunciation tips.");
@@ -240,6 +296,8 @@ const App = () => {
     // Function to initiate British Vocabulary/Idioms feature
     const getBritishVocabulary = async () => {
         setError('');
+        if (isLoading || isListening || isSpeaking || awaitingFeatureInput) return; // Prevent multiple clicks
+        
         setConversation(prev => [...prev, { role: 'user', text: '✨ I\'d like some British vocabulary/idioms.' }]);
         const promptText = 'Excellent! Please tell me, what topic would you like vocabulary or idioms for? For example, you could say "food," "travel," or "everyday life."';
         setConversation(prev => [...prev, { role: 'model', text: promptText }]);
@@ -250,6 +308,8 @@ const App = () => {
     // Function to initiate Rephrase Sentence feature
     const rephraseSentence = async () => {
         setError('');
+        if (isLoading || isListening || isSpeaking || awaitingFeatureInput) return; // Prevent multiple clicks
+
         setConversation(prev => [...prev, { role: 'user', text: '✨ I\'d like a sentence rephrased in British English.' }]);
         const promptText = 'Certainly. Please provide the sentence you wish to rephrase. I will endeavour to make it sound more quintessentially British.';
         setConversation(prev => [...prev, { role: 'model', text: promptText }]);
@@ -259,39 +319,12 @@ const App = () => {
 
     // Function to start a role-play scenario using Gemini API
     const startRolePlay = async () => {
+        setError('');
+        if (isLoading || isListening || isSpeaking || awaitingFeatureInput) return; // Prevent multiple clicks
+
         const prompt = "As a British BBC accent teacher, please initiate a short, engaging role-play scenario for the user to practice their British English. Suggest a setting (e.g., a café, a train station, a British garden party) and start the conversation. Keep your initial prompt for the role-play short and set the scene clearly.";
         setConversation(prev => [...prev, { role: 'user', text: '✨ Starting a new role-play scenario...' }]);
         await sendPromptToGemini(prompt);
-    };
-
-    // Function to speak a given text message
-    const speakMessage = (text) => {
-        const synth = window.speechSynthesis;
-        if (synth.speaking) {
-            synth.cancel(); // Stop current speech if any
-        }
-
-        const voices = synth.getVoices();
-        // Find a British English voice
-        // Prioritize Google UK English voices if available, otherwise any en-GB
-        const britishVoice = voices.find(voice => voice.name.includes('Google UK English') || voice.lang === 'en-GB');
-        if (britishVoice) {
-            utteranceRef.current.voice = britishVoice;
-        } else {
-            console.warn("British English voice not found. Using default voice.");
-        }
-
-        utteranceRef.current.text = text;
-        synth.speak(utteranceRef.current);
-    };
-
-    // Function to stop the AI's current speech
-    const stopSpeaking = () => {
-        const synth = window.speechSynthesis;
-        if (synth.speaking) {
-            synth.cancel();
-            setIsSpeaking(false);
-        }
     };
 
     // Function to clear the conversation history
@@ -301,13 +334,13 @@ const App = () => {
         setAwaitingFeatureInput(null); // Reset any awaiting feature input
         stopSpeaking();
         stopListening();
+        setMessage(''); // Clear input field as well
     };
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex items-center justify-center p-4 font-sans antialiased">
             <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-4xl flex flex-col md:flex-row gap-6 border border-blue-200">
                 {/* Left Panel: App Title and Description */}
-                {/* Adjustments for responsiveness and fixed width on larger screens */}
                 <div className="w-full md:w-1/3 p-4 bg-blue-50 rounded-lg shadow-inner flex flex-col justify-between flex-shrink-0">
                     <div>
                         <h1 className="text-4xl font-extrabold text-blue-800 mb-4 text-center">
@@ -335,8 +368,7 @@ const App = () => {
                 </div>
 
                 {/* Right Panel: Chat Interface */}
-                {/* Adjusted height for chat window and flexible sizing */}
-                <div className="w-full md:w-2/3 flex flex-col h-[90vh] md:h-[85vh] max-h-[90vh] md:max-h-[85vh]"> {/* Increased height here */}
+                <div className="w-full md:w-2/3 flex flex-col h-[90vh] md:h-[85vh] max-h-[90vh] md:max-h-[85vh]">
                     {/* Chat History */}
                     <div ref={chatHistoryRef} className="flex-1 bg-gray-50 p-4 rounded-lg overflow-y-auto shadow-inner mb-4 border border-gray-200">
                         {conversation.map((msg, index) => (
@@ -352,7 +384,6 @@ const App = () => {
                     </div>
 
                     {/* Message Input and Controls */}
-                    {/* Adjusted layout for input and buttons */}
                     <div className="flex flex-col gap-3">
                         {/* Input field and Send button in one row */}
                         <div className="flex">
@@ -379,7 +410,6 @@ const App = () => {
                         </div>
                         
                         {/* Buttons for Speaking, Tips, Role-play, Clear Chat */}
-                        {/* On small screens, they will stack (col-span-2 for clear), on md and up, they'll be in 3 columns */}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                             <button
                                 onClick={startListening}
