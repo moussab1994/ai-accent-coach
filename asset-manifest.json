@@ -1,0 +1,10 @@
+{
+  "files": {
+    "main.js": "/ai-accent-coach/static/js/main.fa41b73d.js",
+    "index.html": "/ai-accent-coach/index.html",
+    "main.fa41b73d.js.map": "/ai-accent-coach/static/js/main.fa41b73d.js.map"
+  },
+  "entrypoints": [
+    "static/js/main.fa41b73d.js"
+  ]
+}
